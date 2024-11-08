@@ -1,379 +1,235 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from sklearn.ensemble import RandomForestRegressor
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from scipy import stats
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error
 
-# Rest of the code remains the same, just remove the seaborn import and any seaborn-related code
-
-class LPBFAnalyzer:
-    def __init__(self, data):
-        """Initialize the analyzer with the data."""
-        if isinstance(data, str):
-            self.df = pd.read_csv(data, header=1)
-        else:
-            data.seek(0)
-            self.df = pd.read_csv(data, header=1)
+class LPBFPredictor:
+    def __init__(self, data_file):
+        """Initialize the predictor with data file"""
+        self.df = pd.read_csv(data_file, header=1)
         self.clean_data()
+        self.train_model()
         
     def clean_data(self):
-        """Clean and prepare the data for analysis."""
-        # Remove unnamed columns
-        self.df = self.df.loc[:, ~self.df.columns.str.contains('^Unnamed')]
+        """Clean and prepare the data"""
+        # Convert columns to numeric
+        self.df['YS'] = pd.to_numeric(self.df['YS'].astype(str).str.replace('Mpa', ''), errors='coerce')
+        self.df['power'] = pd.to_numeric(self.df['power'], errors='coerce')
+        self.df['speed'] = pd.to_numeric(self.df['speed'], errors='coerce')
         
-        # Convert numeric columns
-        for col in self.df.columns:
-            try:
-                # Replace any '#DIV/0!' with NaN
-                self.df[col] = self.df[col].replace('#DIV/0!', np.nan)
-                self.df[col] = pd.to_numeric(self.df[col], errors='ignore')
-            except:
-                continue
+        # Create analysis dataframe
+        self.analysis_df = self.df[['power', 'speed', 'Hatch', 'thickness', 'p/v', 'YS', 'Direction']].copy()
+        self.analysis_df = self.analysis_df.dropna()
         
-        # Define mechanical properties to look for
-        mech_props = ['UTS', 'YS', 'Elongation', 'hardness']
-        self.available_props = [prop for prop in mech_props if prop in self.df.columns]
+        # Calculate typical process windows
+        self.process_windows = {
+            'power': {'min': 300, 'max': 400, 'optimal': 350},
+            'speed': {'min': 800, 'max': 1300, 'optimal': 1000},
+            'p/v': {'min': 0.3, 'max': 0.5, 'optimal': 0.4}
+        }
+    
+    def train_model(self):
+        """Train the prediction model"""
+        X = self.analysis_df[['power', 'speed', 'Hatch', 'thickness', 'p/v']]
+        y = self.analysis_df['YS']
         
-        if not self.available_props:
-            st.error(f"No mechanical properties columns found. Looking for: {mech_props}")
-            st.error("Available columns: " + ", ".join(self.df.columns.tolist()))
-            raise ValueError("Required columns not found in dataset")
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        
+        self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.model.fit(self.X_train, self.y_train)
+        
+        # Calculate model performance metrics
+        self.model_metrics = {
+            'train_score': r2_score(self.y_train, self.model.predict(self.X_train)),
+            'test_score': r2_score(self.y_test, self.model.predict(self.X_test)),
+            'mae': mean_absolute_error(self.y_test, self.model.predict(self.X_test))
+        }
+    
+    def predict_strength(self, power, speed):
+        """Predict yield strength for given parameters"""
+        # Get median values for other parameters
+        median_params = self.analysis_df[['Hatch', 'thickness']].median()
+        
+        # Make prediction
+        prediction = self.model.predict([[
+            power,
+            speed,
+            median_params['Hatch'],
+            median_params['thickness'],
+            power/speed
+        ]])[0]
+        
+        return prediction
+    
+    def analyze_parameters(self, power, speed):
+        """Analyze the given parameters and provide feedback"""
+        p_v_ratio = power/speed
+        
+        # Initialize feedback categories
+        issues = []
+        process_window = []
+        problems = []
+        
+        # Check power
+        if power < self.process_windows['power']['min']:
+            issues.append("Power is too low for optimal processing")
+            problems.append("Insufficient energy for complete melting")
+            problems.append("Poor layer-to-layer bonding likely")
+        elif power > self.process_windows['power']['max']:
+            issues.append("Power is higher than typical range")
+            problems.append("Risk of keyholing defects")
+            problems.append("Potential for excessive heat input")
+        
+        # Check speed
+        if speed < self.process_windows['speed']['min']:
+            issues.append("Scan speed is too low")
+            problems.append("Excessive heat accumulation possible")
+            problems.append("Poor surface finish likely")
+        elif speed > self.process_windows['speed']['max']:
+            issues.append("Scan speed is too high")
+            problems.append("Insufficient melting may occur")
+            problems.append("Risk of lack-of-fusion defects")
+        
+        # Check P/V ratio
+        if p_v_ratio < self.process_windows['p/v']['min']:
+            process_window.append("P/V ratio is below optimal range")
+            problems.append("Incomplete melting likely")
+        elif p_v_ratio > self.process_windows['p/v']['max']:
+            process_window.append("P/V ratio is above optimal range")
+            problems.append("Excessive energy input")
+        
+        # Add process window information
+        process_window.append(f"Optimal power range: {self.process_windows['power']['min']}-{self.process_windows['power']['max']}W")
+        process_window.append(f"Optimal speed range: {self.process_windows['speed']['min']}-{self.process_windows['speed']['max']}mm/s")
+        process_window.append(f"Optimal P/V ratio: {self.process_windows['p/v']['min']}-{self.process_windows['p/v']['max']}J/mm")
+        
+        return {
+            'issues': issues,
+            'process_window': process_window,
+            'problems': problems
+        }
+    
+    def create_process_window_plot(self, current_power, current_speed):
+        """Create process window visualization"""
+        fig = go.Figure()
+        
+        # Add dataset points
+        fig.add_trace(go.Scatter(
+            x=self.analysis_df['power'],
+            y=self.analysis_df['speed'],
+            mode='markers',
+            name='Dataset Points',
+            marker=dict(
+                size=8,
+                color=self.analysis_df['YS'],
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title='Yield Strength (MPa)')
+            ),
+            hovertemplate='Power: %{x}W<br>Speed: %{y}mm/s<br>YS: %{marker.color:.0f}MPa<extra></extra>'
+        ))
+        
+        # Add current point
+        fig.add_trace(go.Scatter(
+            x=[current_power],
+            y=[current_speed],
+            mode='markers',
+            name='Selected Parameters',
+            marker=dict(
+                size=15,
+                color='red',
+                symbol='star'
+            ),
+            hovertemplate='Power: %{x}W<br>Speed: %{y}mm/s<extra></extra>'
+        ))
+        
+        # Add process window rectangle
+        fig.add_shape(
+            type="rect",
+            x0=self.process_windows['power']['min'],
+            y0=self.process_windows['speed']['min'],
+            x1=self.process_windows['power']['max'],
+            y1=self.process_windows['speed']['max'],
+            line=dict(
+                color="rgba(0,255,0,0.5)",
+                width=2,
+            ),
+            fillcolor="rgba(0,255,0,0.1)"
+        )
+        
+        fig.update_layout(
+            title='Process Window Analysis',
+            xaxis_title='Power (W)',
+            yaxis_title='Scan Speed (mm/s)',
+            hovermode='closest'
+        )
+        
+        return fig
 
 def main():
-    st.set_page_config(page_title="LPBF Parameter Analyzer", layout="wide")
+    st.set_page_config(page_title="LPBF Parameter Predictor", layout="wide")
     
-    st.title("LPBF AlSi10Mg Parameter Analysis Tool")
+    st.title("LPBF AlSi10Mg Parameter Predictor")
     
-    uploaded_file = st.file_uploader("Upload your LPBF data CSV", type="csv")
+    uploaded_file = st.file_uploader("Upload LPBF data CSV", type="csv")
     
     if uploaded_file is not None:
         try:
-            analyzer = LPBFAnalyzer(uploaded_file)
+            predictor = LPBFPredictor(uploaded_file)
             
-            # Add visualization options
-            viz_type = st.selectbox(
-                "Select Visualization Type",
-                ["Distribution Analysis", "Parameter Relationships", "Process Window", "Build Direction Effects"]
-            )
+            st.sidebar.header("Parameter Input")
+            power = st.sidebar.slider("Laser Power (W)", 100, 800, 350)
+            speed = st.sidebar.slider("Scan Speed (mm/s)", 100, 2000, 1000)
             
-            if viz_type == "Distribution Analysis":
-                show_distribution_analysis(analyzer)
-            elif viz_type == "Parameter Relationships":
-                show_parameter_relationships(analyzer)
-            elif viz_type == "Process Window":
-                show_process_window(analyzer)
-            elif viz_type == "Build Direction Effects":
-                show_direction_effects(analyzer)
+            # Make prediction
+            predicted_ys = predictor.predict_strength(power, speed)
+            
+            # Get analysis
+            analysis = predictor.analyze_parameters(power, speed)
+            
+            # Display results
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.header("Prediction Results")
+                st.metric("Predicted Yield Strength", f"{predicted_ys:.1f} MPa")
                 
+                st.subheader("Key Issues")
+                if analysis['issues']:
+                    for issue in analysis['issues']:
+                        st.warning(issue)
+                else:
+                    st.success("Parameters are within typical ranges")
+                
+                st.subheader("Potential Problems")
+                if analysis['problems']:
+                    for problem in analysis['problems']:
+                        st.error(problem)
+                else:
+                    st.success("No significant problems expected")
+            
+            with col2:
+                st.subheader("Process Window Analysis")
+                for info in analysis['process_window']:
+                    st.info(info)
+                
+                st.subheader("Model Performance")
+                st.write(f"Training R² Score: {predictor.model_metrics['train_score']:.3f}")
+                st.write(f"Testing R² Score: {predictor.model_metrics['test_score']:.3f}")
+                st.write(f"Mean Absolute Error: {predictor.model_metrics['mae']:.1f} MPa")
+            
+            # Show process window plot
+            st.plotly_chart(predictor.create_process_window_plot(power, speed))
+            
         except Exception as e:
-            st.error(f"Error processing file: {str(e)}")
-            st.write("Debug information:")
-            try:
-                df_debug = pd.read_csv(uploaded_file, nrows=5)
-                st.write("First 5 rows:")
-                st.write(df_debug)
-            except Exception as debug_e:
-                st.write(f"Error reading file: {str(debug_e)}")
-
-def show_distribution_analysis(analyzer):
-    st.header("Distribution Analysis")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        property_to_plot = st.selectbox(
-            "Select Property to Analyze",
-            analyzer.available_props
-        )
-        
-        # Create combined histogram and box plot
-        fig = make_subplots(
-            rows=2, cols=1,
-            row_heights=[0.7, 0.3],
-            vertical_spacing=0.1,
-            subplot_titles=(f"Distribution of {property_to_plot}", "Box Plot")
-        )
-        
-        # Add histogram
-        fig.add_trace(
-            go.Histogram(
-                x=analyzer.df[property_to_plot],
-                name="Distribution",
-                nbinsx=30,
-                showlegend=False
-            ),
-            row=1, col=1
-        )
-        
-        # Add box plot
-        fig.add_trace(
-            go.Box(
-                x=analyzer.df[property_to_plot],
-                name="Box Plot",
-                showlegend=False
-            ),
-            row=2, col=1
-        )
-        
-        fig.update_layout(height=600)
-        st.plotly_chart(fig)
-    
-    with col2:
-        # Add statistical summary
-        st.write("Statistical Summary:")
-        stats_df = pd.DataFrame({
-            'Statistic': [
-                'Mean',
-                'Median',
-                'Std Dev',
-                'Q1 (25%)',
-                'Q3 (75%)',
-                'IQR',
-                'Min',
-                'Max'
-            ],
-            'Value': [
-                analyzer.df[property_to_plot].mean(),
-                analyzer.df[property_to_plot].median(),
-                analyzer.df[property_to_plot].std(),
-                analyzer.df[property_to_plot].quantile(0.25),
-                analyzer.df[property_to_plot].quantile(0.75),
-                analyzer.df[property_to_plot].quantile(0.75) - analyzer.df[property_to_plot].quantile(0.25),
-                analyzer.df[property_to_plot].min(),
-                analyzer.df[property_to_plot].max()
-            ]
-        })
-        st.dataframe(stats_df)
-
-def show_parameter_relationships(analyzer):
-    st.header("Parameter Relationships")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        x_param = st.selectbox(
-            "Select X Parameter",
-            analyzer.df.select_dtypes(include=[np.number]).columns
-        )
-        
-        y_param = st.selectbox(
-            "Select Y Parameter",
-            [col for col in analyzer.df.select_dtypes(include=[np.number]).columns if col != x_param]
-        )
-        
-        color_by = st.selectbox(
-            "Color by",
-            ["None", "Direction"] + [col for col in analyzer.df.columns if col not in [x_param, y_param]]
-        )
-    
-    # Create scatter plot with trend line
-    if color_by == "None":
-        fig = px.scatter(
-            analyzer.df,
-            x=x_param,
-            y=y_param,
-            trendline="ols",
-            trendline_color_override="red"
-        )
-    else:
-        fig = px.scatter(
-            analyzer.df,
-            x=x_param,
-            y=y_param,
-            color=color_by,
-            trendline="ols"
-        )
-    
-    fig.update_layout(
-        title=f"{y_param} vs {x_param}",
-        height=600,
-        width=800
-    )
-    
-    st.plotly_chart(fig)
-    
-    # Calculate and display correlation
-    correlation = analyzer.df[x_param].corr(analyzer.df[y_param])
-    st.write(f"Correlation coefficient: {correlation:.3f}")
-
-def show_process_window(analyzer):
-    st.header("Process Window Analysis")
-    
-    # Get available process parameters
-    process_params = [col for col in analyzer.df.columns if col in 
-                     ["power", "speed", "Hatch", "thickness", "p/v"]]
-    
-    if len(process_params) < 2:
-        st.warning("Not enough process parameters found in the dataset")
-        return
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        x_process = st.selectbox(
-            "Select X Process Parameter",
-            process_params
-        )
-        
-        y_process = st.selectbox(
-            "Select Y Process Parameter",
-            [p for p in process_params if p != x_process]
-        )
-        
-        color_property = st.selectbox(
-            "Color by Property",
-            analyzer.available_props
-        )
-
-    # Convert color property to numeric, removing any units and handling NaN
-    try:
-        color_values = pd.to_numeric(
-            analyzer.df[color_property].str.replace('Mpa', '').str.replace('HV', ''),
-            errors='coerce'
-        )
-    except:
-        # If direct conversion failed, try converting the column as is
-        color_values = pd.to_numeric(analyzer.df[color_property], errors='coerce')
-    
-    # Create process window plot
-    fig = go.Figure()
-    
-    # Filter out rows where any of the required values are NaN
-    mask = ~(analyzer.df[x_process].isna() | 
-             analyzer.df[y_process].isna() | 
-             color_values.isna())
-    
-    # Add scatter plot with only valid data points
-    scatter = go.Scatter(
-        x=analyzer.df[x_process][mask],
-        y=analyzer.df[y_process][mask],
-        mode='markers',
-        marker=dict(
-            size=10,
-            color=color_values[mask],
-            colorscale='Viridis',
-            showscale=True,
-            colorbar=dict(
-                title=f"{color_property} (numeric value)"
-            )
-        ),
-        text=[f"{color_property}: {val}" for val in analyzer.df[color_property][mask]],
-        hovertemplate=
-        f"<b>{x_process}</b>: %{{x}}<br>" +
-        f"<b>{y_process}</b>: %{{y}}<br>" +
-        f"<b>{color_property}</b>: %{{text}}<extra></extra>"
-    )
-    
-    fig.add_trace(scatter)
-    
-    # Update layout with more informative labels
-    fig.update_layout(
-        title=f"Process Window: Effect on {color_property}",
-        xaxis_title=f"{x_process}",
-        yaxis_title=f"{y_process}",
-        height=600,
-        width=800
-    )
-    
-    # Add colorbar annotation
-    fig.update_layout(
-        annotations=[
-            dict(
-                x=1.2,
-                y=0.5,
-                xref="paper",
-                yref="paper",
-                text=f"Color shows {color_property} values",
-                showarrow=False,
-                font=dict(size=12)
-            )
-        ]
-    )
-    
-    st.plotly_chart(fig)
-    
-    # Add statistical summary
-    with st.expander("View Statistical Summary"):
-        st.write("Summary Statistics:")
-        summary_df = pd.DataFrame({
-            'Parameter': [x_process, y_process, color_property],
-            'Mean': [
-                analyzer.df[x_process].mean(),
-                analyzer.df[y_process].mean(),
-                color_values.mean()
-            ],
-            'Std Dev': [
-                analyzer.df[x_process].std(),
-                analyzer.df[y_process].std(),
-                color_values.std()
-            ],
-            'Min': [
-                analyzer.df[x_process].min(),
-                analyzer.df[y_process].min(),
-                color_values.min()
-            ],
-            'Max': [
-                analyzer.df[x_process].max(),
-                analyzer.df[y_process].max(),
-                color_values.max()
-            ]
-        })
-        st.dataframe(summary_df)
-        
-        # Add correlation information
-        st.write("Correlations:")
-        corr_matrix = pd.DataFrame({
-            x_process: [1, 
-                       analyzer.df[x_process].corr(analyzer.df[y_process]),
-                       analyzer.df[x_process].corr(color_values)],
-            y_process: [analyzer.df[x_process].corr(analyzer.df[y_process]),
-                       1,
-                       analyzer.df[y_process].corr(color_values)],
-            color_property: [analyzer.df[x_process].corr(color_values),
-                           analyzer.df[y_process].corr(color_values),
-                           1]
-        }, index=[x_process, y_process, color_property])
-        st.dataframe(corr_matrix.round(3))
-
-def show_direction_effects(analyzer):
-    st.header("Build Direction Effects")
-    
-    if 'Direction' not in analyzer.df.columns:
-        st.warning("No build direction information in dataset")
-        return
-    
-    property_name = st.selectbox(
-        "Select Property",
-        analyzer.available_props
-    )
-    
-    # Create violin plot with individual points
-    fig = go.Figure()
-    
-    for direction in analyzer.df['Direction'].unique():
-        if pd.notna(direction):  # Only process non-NaN directions
-            # Add violin plot
-            fig.add_trace(go.Violin(
-                x=analyzer.df[analyzer.df['Direction'] == direction]['Direction'],
-                y=analyzer.df[analyzer.df['Direction'] == direction][property_name],
-                name=str(direction),
-                box_visible=True,
-                meanline_visible=True,
-                points='all'
-            ))
-    
-    fig.update_layout(
-        title=f"{property_name} Distribution by Build Direction",
-        xaxis_title="Build Direction",
-        yaxis_title=property_name,
-        height=600,
-        width=800,
-        violinmode='group'
-    )
-    
-    st.plotly_chart(fig)
+            st.error(f"Error: {str(e)}")
+            st.write("Please ensure your CSV file has the correct format")
 
 if __name__ == "__main__":
     main()
