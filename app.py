@@ -226,40 +226,116 @@ def show_process_window(analyzer):
             "Color by Property",
             analyzer.available_props
         )
+
+    # Convert color property to numeric, removing any units and handling NaN
+    try:
+        color_values = pd.to_numeric(
+            analyzer.df[color_property].str.replace('Mpa', '').str.replace('HV', ''),
+            errors='coerce'
+        )
+    except:
+        # If direct conversion failed, try converting the column as is
+        color_values = pd.to_numeric(analyzer.df[color_property], errors='coerce')
     
     # Create process window plot
     fig = go.Figure()
     
-    # Add scatter plot
+    # Filter out rows where any of the required values are NaN
+    mask = ~(analyzer.df[x_process].isna() | 
+             analyzer.df[y_process].isna() | 
+             color_values.isna())
+    
+    # Add scatter plot with only valid data points
     scatter = go.Scatter(
-        x=analyzer.df[x_process],
-        y=analyzer.df[y_process],
+        x=analyzer.df[x_process][mask],
+        y=analyzer.df[y_process][mask],
         mode='markers',
         marker=dict(
             size=10,
-            color=analyzer.df[color_property],
+            color=color_values[mask],
             colorscale='Viridis',
             showscale=True,
-            colorbar=dict(title=color_property)
+            colorbar=dict(
+                title=f"{color_property} (numeric value)"
+            )
         ),
-        text=analyzer.df[color_property],
+        text=[f"{color_property}: {val}" for val in analyzer.df[color_property][mask]],
         hovertemplate=
-        f'<b>{x_process}</b>: %{{x}}<br>' +
-        f'<b>{y_process}</b>: %{{y}}<br>' +
-        f'<b>{color_property}</b>: %{{text}}<extra></extra>'
+        f"<b>{x_process}</b>: %{{x}}<br>" +
+        f"<b>{y_process}</b>: %{{y}}<br>" +
+        f"<b>{color_property}</b>: %{{text}}<extra></extra>"
     )
     
     fig.add_trace(scatter)
     
+    # Update layout with more informative labels
     fig.update_layout(
-        title=f"Process Window: {color_property} Distribution",
-        xaxis_title=x_process,
-        yaxis_title=y_process,
+        title=f"Process Window: Effect on {color_property}",
+        xaxis_title=f"{x_process}",
+        yaxis_title=f"{y_process}",
         height=600,
         width=800
     )
     
+    # Add colorbar annotation
+    fig.update_layout(
+        annotations=[
+            dict(
+                x=1.2,
+                y=0.5,
+                xref="paper",
+                yref="paper",
+                text=f"Color shows {color_property} values",
+                showarrow=False,
+                font=dict(size=12)
+            )
+        ]
+    )
+    
     st.plotly_chart(fig)
+    
+    # Add statistical summary
+    with st.expander("View Statistical Summary"):
+        st.write("Summary Statistics:")
+        summary_df = pd.DataFrame({
+            'Parameter': [x_process, y_process, color_property],
+            'Mean': [
+                analyzer.df[x_process].mean(),
+                analyzer.df[y_process].mean(),
+                color_values.mean()
+            ],
+            'Std Dev': [
+                analyzer.df[x_process].std(),
+                analyzer.df[y_process].std(),
+                color_values.std()
+            ],
+            'Min': [
+                analyzer.df[x_process].min(),
+                analyzer.df[y_process].min(),
+                color_values.min()
+            ],
+            'Max': [
+                analyzer.df[x_process].max(),
+                analyzer.df[y_process].max(),
+                color_values.max()
+            ]
+        })
+        st.dataframe(summary_df)
+        
+        # Add correlation information
+        st.write("Correlations:")
+        corr_matrix = pd.DataFrame({
+            x_process: [1, 
+                       analyzer.df[x_process].corr(analyzer.df[y_process]),
+                       analyzer.df[x_process].corr(color_values)],
+            y_process: [analyzer.df[x_process].corr(analyzer.df[y_process]),
+                       1,
+                       analyzer.df[y_process].corr(color_values)],
+            color_property: [analyzer.df[x_process].corr(color_values),
+                           analyzer.df[y_process].corr(color_values),
+                           1]
+        }, index=[x_process, y_process, color_property])
+        st.dataframe(corr_matrix.round(3))
 
 def show_direction_effects(analyzer):
     st.header("Build Direction Effects")
