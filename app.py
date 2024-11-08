@@ -4,8 +4,9 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import seaborn as sns
 from scipy import stats
+
+# Rest of the code remains the same, just remove the seaborn import and any seaborn-related code
 
 class LPBFAnalyzer:
     def __init__(self, data):
