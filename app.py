@@ -8,27 +8,77 @@ import seaborn as sns
 from scipy import stats
 
 class LPBFAnalyzer:
-    # ... [Previous class methods remain the same until show_overview] ...
+    def __init__(self, data):
+        """Initialize the analyzer with the data."""
+        if isinstance(data, str):
+            self.df = pd.read_csv(data, header=1)
+        else:
+            data.seek(0)
+            self.df = pd.read_csv(data, header=1)
+        self.clean_data()
+        
+    def clean_data(self):
+        """Clean and prepare the data for analysis."""
+        # Remove unnamed columns
+        self.df = self.df.loc[:, ~self.df.columns.str.contains('^Unnamed')]
+        
+        # Convert numeric columns
+        for col in self.df.columns:
+            try:
+                # Replace any '#DIV/0!' with NaN
+                self.df[col] = self.df[col].replace('#DIV/0!', np.nan)
+                self.df[col] = pd.to_numeric(self.df[col], errors='ignore')
+            except:
+                continue
+        
+        # Define mechanical properties to look for
+        mech_props = ['UTS', 'YS', 'Elongation', 'hardness']
+        self.available_props = [prop for prop in mech_props if prop in self.df.columns]
+        
+        if not self.available_props:
+            st.error(f"No mechanical properties columns found. Looking for: {mech_props}")
+            st.error("Available columns: " + ", ".join(self.df.columns.tolist()))
+            raise ValueError("Required columns not found in dataset")
 
-def show_overview(analyzer):
-    st.header("Dataset Overview")
+def main():
+    st.set_page_config(page_title="LPBF Parameter Analyzer", layout="wide")
     
-    # Add visualization options
-    viz_type = st.selectbox(
-        "Select Visualization Type",
-        ["Distribution Analysis", "Parameter Relationships", "Process Window", "Build Direction Effects"]
-    )
+    st.title("LPBF AlSi10Mg Parameter Analysis Tool")
     
-    if viz_type == "Distribution Analysis":
-        show_distribution_analysis(analyzer)
-    elif viz_type == "Parameter Relationships":
-        show_parameter_relationships(analyzer)
-    elif viz_type == "Process Window":
-        show_process_window(analyzer)
-    elif viz_type == "Build Direction Effects":
-        show_direction_effects(analyzer)
+    uploaded_file = st.file_uploader("Upload your LPBF data CSV", type="csv")
+    
+    if uploaded_file is not None:
+        try:
+            analyzer = LPBFAnalyzer(uploaded_file)
+            
+            # Add visualization options
+            viz_type = st.selectbox(
+                "Select Visualization Type",
+                ["Distribution Analysis", "Parameter Relationships", "Process Window", "Build Direction Effects"]
+            )
+            
+            if viz_type == "Distribution Analysis":
+                show_distribution_analysis(analyzer)
+            elif viz_type == "Parameter Relationships":
+                show_parameter_relationships(analyzer)
+            elif viz_type == "Process Window":
+                show_process_window(analyzer)
+            elif viz_type == "Build Direction Effects":
+                show_direction_effects(analyzer)
+                
+        except Exception as e:
+            st.error(f"Error processing file: {str(e)}")
+            st.write("Debug information:")
+            try:
+                df_debug = pd.read_csv(uploaded_file, nrows=5)
+                st.write("First 5 rows:")
+                st.write(df_debug)
+            except Exception as debug_e:
+                st.write(f"Error reading file: {str(debug_e)}")
 
 def show_distribution_analysis(analyzer):
+    st.header("Distribution Analysis")
+    
     col1, col2 = st.columns(2)
     
     with col1:
@@ -97,7 +147,7 @@ def show_distribution_analysis(analyzer):
         st.dataframe(stats_df)
 
 def show_parameter_relationships(analyzer):
-    st.subheader("Parameter Relationships")
+    st.header("Parameter Relationships")
     
     col1, col2 = st.columns(2)
     
@@ -148,19 +198,27 @@ def show_parameter_relationships(analyzer):
     st.write(f"Correlation coefficient: {correlation:.3f}")
 
 def show_process_window(analyzer):
-    st.subheader("Process Window Analysis")
+    st.header("Process Window Analysis")
+    
+    # Get available process parameters
+    process_params = [col for col in analyzer.df.columns if col in 
+                     ["power", "speed", "Hatch", "thickness", "p/v"]]
+    
+    if len(process_params) < 2:
+        st.warning("Not enough process parameters found in the dataset")
+        return
     
     col1, col2 = st.columns(2)
     
     with col1:
         x_process = st.selectbox(
             "Select X Process Parameter",
-            ["power", "speed", "Hatch", "thickness", "p/v"]
+            process_params
         )
         
         y_process = st.selectbox(
             "Select Y Process Parameter",
-            [p for p in ["power", "speed", "Hatch", "thickness", "p/v"] if p != x_process]
+            [p for p in process_params if p != x_process]
         )
         
         color_property = st.selectbox(
@@ -203,7 +261,7 @@ def show_process_window(analyzer):
     st.plotly_chart(fig)
 
 def show_direction_effects(analyzer):
-    st.subheader("Build Direction Effects")
+    st.header("Build Direction Effects")
     
     if 'Direction' not in analyzer.df.columns:
         st.warning("No build direction information in dataset")
@@ -218,15 +276,16 @@ def show_direction_effects(analyzer):
     fig = go.Figure()
     
     for direction in analyzer.df['Direction'].unique():
-        # Add violin plot
-        fig.add_trace(go.Violin(
-            x=analyzer.df[analyzer.df['Direction'] == direction]['Direction'],
-            y=analyzer.df[analyzer.df['Direction'] == direction][property_name],
-            name=direction,
-            box_visible=True,
-            meanline_visible=True,
-            points='all'
-        ))
+        if pd.notna(direction):  # Only process non-NaN directions
+            # Add violin plot
+            fig.add_trace(go.Violin(
+                x=analyzer.df[analyzer.df['Direction'] == direction]['Direction'],
+                y=analyzer.df[analyzer.df['Direction'] == direction][property_name],
+                name=str(direction),
+                box_visible=True,
+                meanline_visible=True,
+                points='all'
+            ))
     
     fig.update_layout(
         title=f"{property_name} Distribution by Build Direction",
@@ -238,27 +297,6 @@ def show_direction_effects(analyzer):
     )
     
     st.plotly_chart(fig)
-    
-    # Add statistical comparison
-    if len(analyzer.df['Direction'].unique()) >= 2:
-        st.write("Statistical Comparison between Directions:")
-        
-        directions = analyzer.df['Direction'].unique()
-        stats_results = []
-        
-        for i in range(len(directions)):
-            for j in range(i+1, len(directions)):
-                dir1, dir2 = directions[i], directions[j]
-                group1 = analyzer.df[analyzer.df['Direction'] == dir1][property_name].dropna()
-                group2 = analyzer.df[analyzer.df['Direction'] == dir2][property_name].dropna()
-                
-                if len(group1) > 0 and len(group2) > 0:
-                    t_stat, p_val = stats.ttest_ind(group1, group2)
-                    stats_results.append({
-                        'Comparison': f'{dir1} vs {dir2}',
-                        't-statistic': t_stat,
-                        'p-value': p_val
-                    })
-        
-        if stats_results:
-            st.dataframe(pd.DataFrame(stats_results))
+
+if __name__ == "__main__":
+    main()
