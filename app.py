@@ -16,14 +16,38 @@ class LPBFPredictor:
         
     def clean_data(self):
         """Clean and prepare the data"""
+        # Clean column names (remove trailing spaces)
+        self.df.columns = self.df.columns.str.strip()
+        
         # Convert columns to numeric
         self.df['YS'] = pd.to_numeric(self.df['YS'].astype(str).str.replace('Mpa', ''), errors='coerce')
         self.df['power'] = pd.to_numeric(self.df['power'], errors='coerce')
         self.df['speed'] = pd.to_numeric(self.df['speed'], errors='coerce')
         
-        # Create analysis dataframe
-        self.analysis_df = self.df[['power', 'speed', 'Hatch', 'thickness', 'p/v', 'YS', 'Direction']].copy()
-        self.analysis_df = self.analysis_df.dropna()
+        # Debug print
+        st.write("Available columns:", self.df.columns.tolist())
+        
+        # Create analysis dataframe with basic parameters
+        basic_params = ['power', 'speed', 'YS']
+        self.analysis_df = self.df[basic_params].copy()
+        
+        # Add additional parameters if they exist
+        additional_params = ['Hatch', 'thickness', 'p/v', 'Direction']
+        for param in additional_params:
+            if param in self.df.columns:
+                self.analysis_df[param] = pd.to_numeric(self.df[param], errors='coerce')
+        
+        # If p/v doesn't exist, calculate it from power and speed
+        if 'p/v' not in self.analysis_df.columns:
+            self.analysis_df['p/v'] = self.analysis_df['power'] / self.analysis_df['speed']
+        
+        # Add default values for missing parameters
+        if 'Hatch' not in self.analysis_df.columns:
+            self.analysis_df['Hatch'] = 0.13  # typical value
+        if 'thickness' not in self.analysis_df.columns:
+            self.analysis_df['thickness'] = 0.03  # typical value
+            
+        self.analysis_df = self.analysis_df.dropna(subset=['power', 'speed', 'YS'])
         
         # Calculate typical process windows
         self.process_windows = {
@@ -34,7 +58,11 @@ class LPBFPredictor:
     
     def train_model(self):
         """Train the prediction model"""
-        X = self.analysis_df[['power', 'speed', 'Hatch', 'thickness', 'p/v']]
+        # Use only numeric columns for prediction
+        numeric_columns = self.analysis_df.select_dtypes(include=[np.number]).columns
+        feature_columns = [col for col in numeric_columns if col != 'YS']
+        
+        X = self.analysis_df[feature_columns]
         y = self.analysis_df['YS']
         
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
@@ -50,21 +78,26 @@ class LPBFPredictor:
             'test_score': r2_score(self.y_test, self.model.predict(self.X_test)),
             'mae': mean_absolute_error(self.y_test, self.model.predict(self.X_test))
         }
+        
+        # Store feature names for prediction
+        self.feature_names = feature_columns
     
     def predict_strength(self, power, speed):
         """Predict yield strength for given parameters"""
-        # Get median values for other parameters
-        median_params = self.analysis_df[['Hatch', 'thickness']].median()
+        # Create prediction input
+        pred_input = pd.DataFrame(columns=self.feature_names)
+        pred_input.loc[0, 'power'] = power
+        pred_input.loc[0, 'speed'] = speed
+        pred_input.loc[0, 'p/v'] = power/speed
+        
+        # Fill in default values for other features if they exist
+        if 'Hatch' in self.feature_names:
+            pred_input.loc[0, 'Hatch'] = self.analysis_df['Hatch'].median()
+        if 'thickness' in self.feature_names:
+            pred_input.loc[0, 'thickness'] = self.analysis_df['thickness'].median()
         
         # Make prediction
-        prediction = self.model.predict([[
-            power,
-            speed,
-            median_params['Hatch'],
-            median_params['thickness'],
-            power/speed
-        ]])[0]
-        
+        prediction = self.model.predict(pred_input)[0]
         return prediction
     
     def analyze_parameters(self, power, speed):
@@ -229,7 +262,10 @@ def main():
             
         except Exception as e:
             st.error(f"Error: {str(e)}")
-            st.write("Please ensure your CSV file has the correct format")
+            st.write("Debug Information:")
+            if uploaded_file is not None:
+                df = pd.read_csv(uploaded_file, header=1)
+                st.write("Columns in uploaded file:", df.columns.tolist())
 
 if __name__ == "__main__":
     main()
