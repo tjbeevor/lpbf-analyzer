@@ -10,7 +10,60 @@ import base64
 from io import StringIO
 
 class LPBFAnalyzer:
-    # ... [Previous analyzer code remains the same] ...
+    def __init__(self, data):
+        """Initialize the analyzer with the data."""
+        if isinstance(data, str):
+            self.df = pd.read_csv(data)
+        else:
+            self.df = pd.read_csv(data)
+        self.clean_data()
+    
+    def clean_data(self):
+        """Clean and prepare the data for analysis."""
+        # Convert numeric columns from string to float
+        numeric_cols = self.df.select_dtypes(include=['object']).columns
+        for col in numeric_cols:
+            try:
+                self.df[col] = pd.to_numeric(self.df[col], errors='coerce')
+            except:
+                continue
+        
+        # Remove rows where all mechanical properties are NaN
+        mech_props = ['UTS', 'YS', 'Elongation', 'hardness']
+        self.df = self.df.dropna(subset=mech_props, how='all')
+    
+    def analyze_heat_treatment_effects(self, property_name):
+        """Analyze the effect of heat treatment on a specific property."""
+        corr = self.df['solution temp'].corr(self.df[property_name])
+        return f"Correlation between solution temperature and {property_name}: {corr:.3f}"
+    
+    def process_parameter_optimization(self, target_property):
+        """Optimize process parameters for a target property using machine learning."""
+        features = ['power', 'speed', 'Hatch', 'thickness', 'p/v']
+        
+        # Prepare data
+        X = self.df[features].dropna()
+        y = self.df[target_property].dropna()
+        
+        # Only use rows where we have both X and y
+        common_index = X.index.intersection(y.index)
+        X = X.loc[common_index]
+        y = y.loc[common_index]
+        
+        if len(X) < 10:  # Check if we have enough data
+            return pd.DataFrame({'feature': features, 'importance': [0]*len(features)})
+        
+        # Train model
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+        model.fit(X, y)
+        
+        # Get feature importance
+        importance = pd.DataFrame({
+            'feature': features,
+            'importance': model.feature_importances_
+        }).sort_values('importance', ascending=False)
+        
+        return importance
 
 def main():
     st.set_page_config(page_title="LPBF Parameter Analyzer", layout="wide")
@@ -21,29 +74,27 @@ def main():
     uploaded_file = st.file_uploader("Upload your LPBF data CSV", type="csv")
     
     if uploaded_file is not None:
-        analyzer = LPBFAnalyzer(uploaded_file)
-        
-        # Sidebar for navigation
-        analysis_type = st.sidebar.selectbox(
-            "Select Analysis Type",
-            ["Overview", "Heat Treatment Analysis", "Process Parameter Optimization", 
-             "Build Direction Analysis", "Property Prediction"]
-        )
-        
-        if analysis_type == "Overview":
-            show_overview(analyzer)
-        
-        elif analysis_type == "Heat Treatment Analysis":
-            show_heat_treatment_analysis(analyzer)
+        try:
+            analyzer = LPBFAnalyzer(uploaded_file)
             
-        elif analysis_type == "Process Parameter Optimization":
-            show_process_optimization(analyzer)
+            # Sidebar for navigation
+            analysis_type = st.sidebar.selectbox(
+                "Select Analysis Type",
+                ["Overview", "Heat Treatment Analysis", "Process Parameter Optimization"]
+            )
             
-        elif analysis_type == "Build Direction Analysis":
-            show_build_direction_analysis(analyzer)
+            if analysis_type == "Overview":
+                show_overview(analyzer)
             
-        elif analysis_type == "Property Prediction":
-            show_property_prediction(analyzer)
+            elif analysis_type == "Heat Treatment Analysis":
+                show_heat_treatment_analysis(analyzer)
+                
+            elif analysis_type == "Process Parameter Optimization":
+                show_process_optimization(analyzer)
+                
+        except Exception as e:
+            st.error(f"Error processing file: {str(e)}")
+            st.write("Please make sure your CSV file has the correct format.")
 
 def show_overview(analyzer):
     st.header("Dataset Overview")
@@ -108,57 +159,6 @@ def show_process_optimization(analyzer):
     st.plotly_chart(fig)
     
     st.write("Optimization Results:", importance)
-
-def show_build_direction_analysis(analyzer):
-    st.header("Build Direction Analysis")
-    
-    results = analyzer.analyze_build_direction_effects()
-    
-    properties = ["UTS", "YS", "Elongation"]
-    
-    for prop in properties:
-        fig = px.box(
-            analyzer.df,
-            x="Direction",
-            y=prop,
-            title=f"{prop} by Build Direction"
-        )
-        st.plotly_chart(fig)
-        
-        if prop in results:
-            st.write(f"Statistical Analysis for {prop}:")
-            st.write(f"T-statistic: {results[prop]['t_statistic']:.3f}")
-            st.write(f"P-value: {results[prop]['p_value']:.3f}")
-
-def show_property_prediction(analyzer):
-    st.header("Property Prediction")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        power = st.slider("Laser Power (W)", 100, 500, 350)
-        speed = st.slider("Scan Speed (mm/s)", 500, 2000, 1000)
-        hatch = st.slider("Hatch Spacing (mm)", 0.05, 0.3, 0.17)
-        thickness = st.slider("Layer Thickness (mm)", 0.02, 0.06, 0.03)
-        pv = st.slider("P/V Ratio", 0.1, 0.5, 0.3)
-    
-    if st.button("Predict Properties"):
-        predictions = analyzer.predict_properties(
-            [power, speed, hatch, thickness, pv]
-        )
-        
-        with col2:
-            st.subheader("Predicted Properties")
-            for prop, value in predictions.items():
-                st.write(f"{prop}: {value:.2f}")
-            
-            # Calculate quality score
-            quality = analyzer.quality_score(
-                predictions['UTS'],
-                predictions['YS'],
-                predictions['Elongation']
-            )
-            st.write(f"Quality Score: {quality:.2f}")
 
 if __name__ == "__main__":
     main()
